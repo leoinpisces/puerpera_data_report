@@ -8,11 +8,7 @@ import re
 import jieba
 import xlwt
 import datetime
-from __builtin__ import file
-from operator import itemgetter
-from datetime import date
-from xmlrpclib import DateTime
-from mimify import File
+
 
 os.environ['NLS_LANG'] = 'SIMPLIFIED CHINESE_CHINA.UTF8'
 
@@ -293,6 +289,10 @@ def build_info(cursor):
             dob_str = item.admission_date[0:4] + dob_str
         item.delivery_date = dob_str
         
+        #如果未抓取到有效的分娩时间  则从数据库中寻找相关文档的caption_date_time
+        if item.delivery_date == "":
+            item.delivery_date = get_caption_time(item.patient_id, item.delivery_mode, cursor)
+        
         #判断是否高危产妇
         item.is_high_risk = is_high_risk(dc_file)
         
@@ -372,6 +372,28 @@ def build_info(cursor):
             else:
                 item.fetus2_gender = "9"
 
+
+#函数-获取相关文档的caption_date_time 未抓取到分娩时间时使用
+def get_caption_time(patient_id, delivery_mode, cursor):
+    if len(patient_id) < 6:
+        return ""
+    #顺产提分娩记录
+    if delivery_mode == "1":
+        sql = "select to_char(caption_date_time,'YYYYMMDD') from jhmr_file_index where patient_id = '%s' and topic like '%%分娩记录%%'" % patient_id
+    #剖宫产提术后首程记录
+    elif delivery_mode == "2":
+        sql = "select to_char(caption_date_time,'YYYYMMDD') from jhmr_file_index where patient_id = '%s' and topic like '%%术后首次病程记录%%'" % patient_id
+    else:
+        return ""
+    cursor.execute(sql)
+    result = cursor.fetchall()
+    
+    if len(result) < 1:
+        return ""
+    
+    for item in result:
+        if len(item[0]) == 8:
+            return item[0]
 
 #函数-判断是否高危产妇1是2否9不清楚
 def is_high_risk(dc_file):
@@ -571,7 +593,7 @@ def get_discharge_certificate(item, cursor):
             sql = "select file_no from jhmr_file_index where patient_id = '%s' and topic like '%%分娩记录%%'" % item.patient_id
         #剖宫产取术后首次病程记录
         elif item.delivery_mode == "2":
-            sql = "select file_no from jhmr_file_index where patient_id = '%s' and topic = '术后首次病程记录'" % item.patient_id
+            sql = "select file_no from jhmr_file_index where patient_id = '%s' and topic like '%%术后首次病程记录%%'" % item.patient_id
             
     cursor.execute(sql)
     result = cursor.fetchall()
