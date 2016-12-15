@@ -12,6 +12,7 @@ from __builtin__ import file
 from operator import itemgetter
 from datetime import date
 from xmlrpclib import DateTime
+from mimify import File
 
 os.environ['NLS_LANG'] = 'SIMPLIFIED CHINESE_CHINA.UTF8'
 
@@ -97,7 +98,7 @@ G_male_searcher = re.compile(r'男婴|活男婴|男活婴')
 G_datestr_for_log = datetime.date.today().strftime("%Y%m%d")
 
 #是否使用出院证作为数据抓取对象
-G_use_discharge_certification = False
+G_use_discharge_certification = True
 
 #函数-连接oracle数据库
 def get_connection():
@@ -134,6 +135,7 @@ def write_log(content, level):
         file_name = r"F:\puerpera_data_report\error_log\error_log_%s.txt".decode('utf-8').encode('cp936') % G_datestr_for_log
         file = open(file_name, "a+")
         file.write(content)
+        file.write("\r\n")
         file.close()
 
         
@@ -143,7 +145,6 @@ def get_basic_info(cursor, begin_str, end_str):
     sql = "select b.patient_id, c.name, c.id_no, to_char(c.date_of_birth, 'YYYYMMDD'), c.citizenship, c.nation, b.nomen, \
     b.mailing_address, a.diagnosis_desc, to_char(b.admission_date_time, 'YYYYMMDD'), c.birth_place from pat_visit b, pat_master_index c, diagnosis a \
     where b.dept_discharge_from = '5937' \
-    and b.patient_id = '342280' \
     and b.discharge_date_time > to_date('%s', 'yyyy/mm/dd') \
     and b.discharge_date_time < to_date('%s', 'yyyy/mm/dd') \
     and b.patient_id = c.patient_id \
@@ -152,7 +153,6 @@ def get_basic_info(cursor, begin_str, end_str):
     and (a.diagnosis_desc like '%%顺产' or a.diagnosis_desc like '%%剖宫产') \
     and (c.name not like '%%之婴' or c.name not like '%%大双' or c.name not like '%%小双')" %(begin_str, end_str)
     
-    print convert(sql)
     cursor.execute(sql) 
     result = cursor.fetchall()
     
@@ -206,7 +206,6 @@ def set_twin_flag(item, cursor):
         item.is_twin = False
         
     return item
-        
         
 
 #函数-处理地址 包括户口地址和现住址
@@ -266,6 +265,21 @@ def build_info(cursor):
         #处理户籍地址和居住地
         address_process(item)
         
+        #处理产妇民族
+        item.ethnicity = get_ethnicity(item.ethnicity)
+        #处理产妇国籍
+        item.nation = get_nation(item.nation)
+        
+        #处理孕周
+        temp_week_str = get_gestational_weeks(item.diagnosis)
+        if temp_week_str != "" and temp_week_str.isdigit():
+            item.gestational_weeks = int(temp_week_str)
+            
+        #处理孕次产次
+        gp_pair = get_GP(item.diagnosis)
+        item.gravidity = int(gp_pair[0])
+        item.parity = int(gp_pair[1])
+        
         #提取产妇出院证或相关提取文档
         result_list = get_discharge_certificate(item, cursor)
         if len(result_list) < 1:
@@ -281,11 +295,6 @@ def build_info(cursor):
         
         #判断是否高危产妇
         item.is_high_risk = is_high_risk(dc_file)
-        
-        #处理孕次产次
-        gp_pair = get_GP(item.diagnosis)
-        item.gravidity = int(gp_pair[0])
-        item.parity = int(gp_pair[1])
         
         #处理apgar评分
         #print convert(dc_file)
@@ -318,23 +327,24 @@ def build_info(cursor):
                     item.fetus2_agpar = int(apgar_list[1])
                     
         #如果没有抓取到apgar评分 或分娩日期 将产妇出院证写入错误日志以供分析
-        if item.fetus1_agpar == 0 or item.delivery_date == "":
-            write_log(dc_file, "error")
+        if item.fetus1_agpar == 0:
+            write_log("missing agpar           " + dc_file, "error")
+        if len(item.delivery_date) < 8:
+            write_log("missing delivery date   " + dc_file, "error")
         
         #判断分娩结局
-        count_num = len(G_fetus_dead_searcher.findall(dc_file))    
+        count_num = len(G_fetus_dead_searcher.findall(dc_file))
+        #count_num大于0 说明存在死胎的情况  
         if count_num > 0:
-            #处理单胎的情况
+            #处理单胎的情况  apgar评分的初始值是0
             if not item.is_twin:
-                if item.fetus1_agpar == "":
-                    item.fetus1_agpar = "0"
                 item.fetus1_outcome = "2"
-            #处理双胞胎的情况 如果apgar一评小于2分 程序认为该新生儿死亡
+            #处理双胞胎的情况 如果apgar一评小于4分 程序认为该新生儿死亡
             if item.is_twin:
-                if not (item.fetus1_agpar != "" and item.fetus2_agpar != ""):
-                    if item.fetus1_agpar < 2:
+                if not (item.fetus1_agpar != 0 and item.fetus2_agpar != 0):
+                    if item.fetus1_agpar < 4:
                         item.fetus1_outcome = "2"
-                    if item.fetus2_agpar < 2:
+                    if item.fetus2_agpar < 4:
                         item.fetus2_outcome = "2"
         else:
             item.fetus1_outcome = "1"
@@ -361,16 +371,6 @@ def build_info(cursor):
                 item.fetus2_gender = result_list[0]
             else:
                 item.fetus2_gender = "9"
-                
-        #处理产妇民族
-        item.ethnicity = get_ethnicity(item.ethnicity)
-        #处理产妇国籍
-        item.nation = get_nation(item.nation)
-        
-        #处理孕周
-        temp_week_str = get_gestational_weeks(item.diagnosis)
-        if temp_week_str != "" and temp_week_str.isdigit():
-            item.gestational_weeks = int(temp_week_str)
 
 
 #函数-判断是否高危产妇1是2否9不清楚
@@ -397,7 +397,7 @@ def get_fetus_gender_from_dc(dc_file):
     return result_list
 
             
-#函数-从数据库中获取胎儿性别
+#函数-从数据库中获取胎儿性别 无法处理母亲同名同姓的问题
 def get_fetus_gender_from_database(name, admission_date, is_twin, cursor):
     result_list = []
     #处理单胎
@@ -416,6 +416,7 @@ def get_fetus_gender_from_database(name, admission_date, is_twin, cursor):
                 break
             sex = str(item[0]).strip()
             ad_date = str(item[1]).strip()
+            #要求新生儿的入院日期(精确到月)与母亲一致
             if str(ad_date) == admission_date[0:6]:
                 if sex == "男":
                     result_list.append("1")
