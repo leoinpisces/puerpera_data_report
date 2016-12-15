@@ -96,6 +96,9 @@ G_male_searcher = re.compile(r'男婴|活男婴|男活婴')
 #获取今日的日期以命名错误日志
 G_datestr_for_log = datetime.date.today().strftime("%Y%m%d")
 
+#是否使用出院证作为数据抓取对象
+G_use_discharge_certification = False
+
 #函数-连接oracle数据库
 def get_connection():
     user_name = 'jhemr'
@@ -140,6 +143,7 @@ def get_basic_info(cursor, begin_str, end_str):
     sql = "select b.patient_id, c.name, c.id_no, to_char(c.date_of_birth, 'YYYYMMDD'), c.citizenship, c.nation, b.nomen, \
     b.mailing_address, a.diagnosis_desc, to_char(b.admission_date_time, 'YYYYMMDD'), c.birth_place from pat_visit b, pat_master_index c, diagnosis a \
     where b.dept_discharge_from = '5937' \
+    and b.patient_id = '342280' \
     and b.discharge_date_time > to_date('%s', 'yyyy/mm/dd') \
     and b.discharge_date_time < to_date('%s', 'yyyy/mm/dd') \
     and b.patient_id = c.patient_id \
@@ -148,7 +152,7 @@ def get_basic_info(cursor, begin_str, end_str):
     and (a.diagnosis_desc like '%%顺产' or a.diagnosis_desc like '%%剖宫产') \
     and (c.name not like '%%之婴' or c.name not like '%%大双' or c.name not like '%%小双')" %(begin_str, end_str)
     
-    #print convert(sql)
+    print convert(sql)
     cursor.execute(sql) 
     result = cursor.fetchall()
     
@@ -187,13 +191,12 @@ def get_basic_info(cursor, begin_str, end_str):
         else:
             temp_obj.delivery_mode = "2"
         
-        #判断是否双胞胎 是否高危产妇
-        set_flag(temp_obj, cursor)
+        #判断是否双胞胎
+        temp_obj = set_twin_flag(temp_obj, cursor)
         G_info_list.append(temp_obj)
-        
-        
-#函数-判断是否双胞胎 是否高危产妇
-def set_flag(item, cursor):
+
+#判断是否双胞胎
+def set_twin_flag(item, cursor):
     sql = "select diagnosis_desc from diagnosis where patient_id = '%s' and diagnosis_desc like '双胎%%'" % item.patient_id
     cursor.execute(sql)
     result = cursor.fetchall()
@@ -201,6 +204,9 @@ def set_flag(item, cursor):
         item.is_twin = True
     else:
         item.is_twin = False
+        
+    return item
+        
         
 
 #函数-处理地址 包括户口地址和现住址
@@ -260,18 +266,21 @@ def build_info(cursor):
         #处理户籍地址和居住地
         address_process(item)
         
-        #提取产妇出院证
-        result_list = get_discharge_certificate(item.patient_id, cursor)
+        #提取产妇出院证或相关提取文档
+        result_list = get_discharge_certificate(item, cursor)
         if len(result_list) < 1:
             continue
         dc_file = result_list[0]
         print convert(dc_file)
+        
         #处理分娩日期
         dob_str = get_dob(G_dob_searcher.findall(dc_file))
         if len(dob_str) == 4:
             dob_str = item.admission_date[0:4] + dob_str
-            
         item.delivery_date = dob_str
+        
+        #判断是否高危产妇
+        item.is_high_risk = is_high_risk(dc_file)
         
         #处理孕次产次
         gp_pair = get_GP(item.diagnosis)
@@ -362,7 +371,19 @@ def build_info(cursor):
         temp_week_str = get_gestational_weeks(item.diagnosis)
         if temp_week_str != "" and temp_week_str.isdigit():
             item.gestational_weeks = int(temp_week_str)
-            
+
+
+#函数-判断是否高危产妇1是2否9不清楚
+def is_high_risk(dc_file):
+    if len(dc_file) < 4:
+        return "9"
+    count = dc_file.count("高危妊娠:是")
+    if count > 0:
+        return "1"
+    else:
+        return "2"
+
+
 #函数-从出院证中获取胎儿性别
 def get_fetus_gender_from_dc(dc_file):
     female_count = len(G_female_searcher.findall(dc_file))        
@@ -520,34 +541,62 @@ def get_GP(diagnosis):
         return (0,0)
     
     return (temp_g, temp_p)
-    
+
+
+#函数-从lob字段中获取内容
+def get_content_from_lob(cursor):
+    result_list = []
+    for row in cursor:
+        content_list = []
+        for column in row:
+            if isinstance(column, cx_Oracle.LOB):
+                content_list.append(str(column))
+            else:
+                content_list.append(column)
+        content = "".join(content_list)
+        result_list.append(content)
+    return result_list
+
         
 #函数-获取住院号为patient_id的患者的出院证 嘉和系统存储电子病历时用的编码是cp936 本程序需要转换为utf-8才能处理
-def get_discharge_certificate(patient_id, cursor):
-    sql = "select file_no from jhmr_file_index where patient_id = '%s' and topic like '%%出院证%%'" % patient_id
+def get_discharge_certificate(item, cursor):
+    
+    #如果使用出院证作为抓取对象
+    if G_use_discharge_certification:
+        sql = "select file_no from jhmr_file_index where patient_id = '%s' and topic like '%%出院证%%'" % item.patient_id
+    else:
+        #顺产取分娩记录
+        if item.delivery_mode == "1":
+            sql = "select file_no from jhmr_file_index where patient_id = '%s' and topic like '%%分娩记录%%'" % item.patient_id
+        #剖宫产取术后首次病程记录
+        elif item.delivery_mode == "2":
+            sql = "select file_no from jhmr_file_index where patient_id = '%s' and topic = '术后首次病程记录'" % item.patient_id
+            
     cursor.execute(sql)
     result = cursor.fetchall()
     d_c_list = []
+    
     for row in result:
     # 嘉和用文件ID定位特定的病历文件 文件ID编码规则如下
-        file_uniq_no = "45038458-2-%s-2-1-0-%s" %(patient_id, str(row[0]))
+        file_uniq_no = "45038458-2-%s-2-1-0-%s" %(item.patient_id, str(row[0]))
         sql = "select d.mr_content from jhmr_file_content_TEXT d where d.file_unique_id = '%s'" % file_uniq_no
         cursor.execute(sql)
-        inner_result = cursor.fetchall()
+        inner_result = get_content_from_lob(cursor)
         for inner_row in inner_result:
-            temp_str = inner_row[0].read()
-            temp_str = temp_str.replace("\r\n","")
-            temp_str = temp_str.replace(" ", "")
-            temp_str = temp_str.decode('cp936').encode('utf-8')
-            temp_str = temp_str.replace("：", ":")
-            temp_str = temp_str.replace("一分钟", "1分钟")
-            temp_str = temp_str.replace("急诊", "")
-            temp_str = temp_str.replace("、", "")
-            temp_str = temp_str.replace("，", "")
-            temp_str = temp_str.replace("。", "")
-            temp_str = temp_str.replace("“", "")
-            temp_str = temp_str.replace("”", "")
-            d_c_list.append(temp_str)
+            if len(inner_row) < 3:
+                continue
+            inner_row = inner_row.replace("\r\n","")
+            inner_row = inner_row.replace(" ", "")
+            inner_row = inner_row.decode('cp936').encode('utf-8')
+            inner_row = inner_row.replace("：", ":")
+            inner_row = inner_row.replace("一分钟", "1分钟")
+            inner_row = inner_row.replace("急诊", "")
+            inner_row = inner_row.replace("、", "")
+            inner_row = inner_row.replace("，", "")
+            inner_row = inner_row.replace("。", "")
+            inner_row = inner_row.replace("“", "")
+            inner_row = inner_row.replace("”", "")
+            d_c_list.append(inner_row)
     return d_c_list
 
 
@@ -560,6 +609,7 @@ def remove_illegal_date(date_str):
         else:
             date_str = date_str.replace(temp_str[index], "")
     return date_str
+
 
 #函数-处理分娩日期串的函数
 def DOB_process(dob_str):
@@ -605,9 +655,7 @@ def DOB_process(dob_str):
                 temp_list[0] = "0" + temp_list[0]
             if len(temp_list[1]) == 1:
                 temp_list[1] = "0" + temp_list[1]
-        for str in temp_list:
-            temp_dob_str = temp_dob_str + str
-        dob_str = temp_dob_str
+        dob_str = "".join(temp_list)
     return dob_str
     
 
