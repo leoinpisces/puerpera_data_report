@@ -96,6 +96,9 @@ G_datestr_for_log = datetime.date.today().strftime("%Y%m%d")
 #是否使用出院证作为数据抓取对象
 G_use_discharge_certification = True
 
+#相关文件的路径前缀
+G_path_prefix = r"F:\code\\"
+
 #函数-连接oracle数据库
 def get_connection():
     user_name = 'jhemr'
@@ -128,7 +131,7 @@ def write_log(content, level):
     if level == "debug":
         print content
     if level == "error":
-        file_name = r"F:\puerpera_data_report\error_log\error_log_%s.txt".decode('utf-8').encode('cp936') % G_datestr_for_log
+        file_name = (G_path_prefix + r"puerpera_data_report\error_log\error_log_%s.txt" % G_datestr_for_log).decode('utf-8').encode('cp936')
         file = open(file_name, "a+")
         file.write(content)
         file.write("\r\n")
@@ -700,7 +703,7 @@ def apgar_process(apgar_str):
 
 #函数-载入地址编码 地址字典结构为地名+数字编码 将常用的重庆 四川 贵州 以及全国和省份字典写在了代码里 以提高效率
 def load_address_dict(file_name):
-    dict_path = ("F:\puerpera_data_report\dict\division_dict" + "\\" + file_name + ".txt" ).decode('utf-8').encode('cp936')
+    dict_path = (G_path_prefix + r"puerpera_data_report\dict\division_dict" + "\\" + file_name + ".txt" ).decode('utf-8').encode('cp936')
     temp_dict = {}
     
     write_log(dict_path, "debug")
@@ -738,7 +741,7 @@ def load_address_dict(file_name):
 
 #函数-载入通用字典 可载入民族和国家名称字典
 def load_dict(file_name):
-    dict_path = ("F:\puerpera_data_report\dict\\" + file_name + ".txt").decode('utf-8').encode('cp936')
+    dict_path = (G_path_prefix + r"puerpera_data_report\dict\\" + file_name + ".txt").decode('utf-8').encode('cp936')
     write_log(dict_path, "debug")
     temp_dict = {}
     
@@ -959,7 +962,7 @@ def write_xls(info_list):
         sheet.write(line_index, 39, convert_c(date_str))
         line_index = line_index + 1
         
-    result_xls.save(r"F:\puerpera_data_report\result.xls".decode('utf-8').encode('cp936'))
+    result_xls.save((G_path_prefix + r"puerpera_data_report\result_" + G_datestr_for_log + ".xls").decode('utf-8').encode('cp936'))
     
     
 #函数-将抓取结果写入csv文件
